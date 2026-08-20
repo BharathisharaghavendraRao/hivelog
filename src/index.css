@@ -1,0 +1,78 @@
+:root {
+  --background: #fbf6ee;
+  --foreground: #2a1a0e;
+  --card: #ffffff;
+  --primary: #a85c1a;
+  --primary-foreground: #ffffff;
+  --secondary: #efe2cc;
+  --muted: #ede4d4;
+  --muted-foreground: #7a5e42;
+  --accent: #f0a500;
+  --input-background: #f5efe4;
+  --border: rgba(90, 55, 20, 0.15);
+  --font-display: 'Playfair Display', Georgia, 'Times New Roman', serif;
+  --font-body: 'DM Sans', 'Segoe UI', sans-serif;
+  --danger: #b84a32;
+  --danger-bg: #fceee9;
+  --warn-bg: #fff6df;
+  --warn-ink: #7a5a12;
+  color-scheme: light;
+  font-family: var(--font-body);
+  line-height: 1.5;
+  font-weight: 400;
+  color: var(--foreground);
+  background: var(--background);
+  font-synthesis: none;
+  text-rendering: optimizeLegibility;
+  -webkit-font-smoothing: antialiased;
+}
+
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#root {
+  min-height: 100%;
+}
+
+body {
+  margin: 0;
+}
+
+button,
+input {
+  font: inherit;
+}
+
+button {
+  cursor: pointer;
+  touch-action: manipulation;
+  -webkit-tap-highlight-color: transparent;
+}
+
+h1,
+h2,
+h3 {
+  font-family: var(--font-display);
+  font-weight: 600;
+  letter-spacing: -0.02em;
+  margin: 0;
+}
+
+strong {
+  font-weight: 600;
+}
+
+kbd {
+  display: inline-block;
+  padding: 0.15rem 0.45rem;
+  border-radius: 6px;
+  background: var(--secondary);
+  border: 1px solid var(--border);
+  font-size: 0.82rem;
+  font-family: var(--font-body);
+}
