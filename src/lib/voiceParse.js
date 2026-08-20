@@ -1,6 +1,10 @@
 function normalize(text) {
-  return text.toLowerCase().replace(/[.,!?]/g, ' ').replace(/\s+/g, ' ').trim()
+  return text.toLowerCase().replace(/[.,!?']/g, ' ').replace(/\s+/g, ' ').trim()
 }
+
+/** Voice agent name — say this to interrupt while Beeva is speaking. */
+export const AGENT_NAME = 'Beeva'
+export const AGENT_WAKE_WORDS = ['beeva', 'beava', 'beva', 'biva']
 
 function hasPhrase(text, phrase) {
   const n = normalize(phrase)
@@ -9,6 +13,23 @@ function hasPhrase(text, phrase) {
   return new RegExp(`(^|\\s)${n.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}(\\s|$)`).test(
     text,
   )
+}
+
+/** Detect wake word and return any command spoken after it. */
+export function detectWakeWord(transcript) {
+  const text = normalize(transcript)
+  if (!text) return { hit: false, remainder: '' }
+
+  for (const word of AGENT_WAKE_WORDS) {
+    if (!hasPhrase(text, word)) continue
+    const remainder = text
+      .replace(new RegExp(`\\b${word}\\b`, 'g'), ' ')
+      .replace(/\s+/g, ' ')
+      .trim()
+    return { hit: true, remainder }
+  }
+
+  return { hit: false, remainder: text }
 }
 
 export function matchHive(transcript, hives = []) {
@@ -113,8 +134,7 @@ export function buildPostSavePrompt(savedHive, hives = []) {
 
   const next =
     hives.find((h) => h.id !== savedHive?.id) || hives[0]
-  const nextName = next?.name || name
-  const nextWord = next?.keywords?.[0] || nextName
+  const nextWord = next?.keywords?.[0] || next?.name || name
 
   if (hives.length === 1) {
     return `Inspection saved for ${name}. Say inspect ${nextWord} to continue, or say exit.`
@@ -266,3 +286,65 @@ export function appendTextField(current, addition) {
   if (!current) return trimmed
   return `${current} ${trimmed}`
 }
+
+/** Parse speech while creating a hive by voice. */
+export function parseCreateHiveCommand(transcript, step) {
+  const text = normalize(transcript)
+
+  if (
+    text === 'cancel' ||
+    text === 'exit' ||
+    text === 'quit' ||
+    text === 'stop' ||
+    text === 'never mind' ||
+    text === 'nevermind'
+  ) {
+    return { type: 'cancel' }
+  }
+
+  if (step === 'location') {
+    if (
+      text === 'skip' ||
+      text === 'none' ||
+      text === 'no location' ||
+      text === 'no' ||
+      text === 'nothing'
+    ) {
+      return { type: 'skip' }
+    }
+  }
+
+  if (
+    text === 'next' ||
+    text === 'done' ||
+    text === 'confirm' ||
+    text === 'yes' ||
+    text === 'save'
+  ) {
+    return { type: 'confirm' }
+  }
+
+  if (text === 'repeat' || text === 'say again') {
+    return { type: 'repeat' }
+  }
+
+  let value = transcript.trim()
+  if (step === 'name') {
+    value = value
+      .replace(
+        /^(the\s+)?(hive\s+)?(name\s+is|is\s+called|called|name)\s+/i,
+        '',
+      )
+      .replace(/^it'?s\s+/i, '')
+      .trim()
+  } else if (step === 'location') {
+    value = value
+      .replace(/^(the\s+)?(location\s+is|apiary\s+is|yard\s+is)\s+/i, '')
+      .replace(/^(at|in|near)\s+/i, '')
+      .trim()
+  }
+
+  if (!value) return { type: 'unknown' }
+  return { type: 'value', value }
+}
+

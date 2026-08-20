@@ -13,11 +13,14 @@ import {
 } from './lib/seedData'
 import {
   appendTextField,
-  parseDashboardCommand,
-  buildPostSavePrompt,
+  AGENT_NAME,
   buildContinuePrompt,
+  buildPostSavePrompt,
+  detectWakeWord,
+  parseDashboardCommand,
   parseModeCommand,
   parseWizardCommand,
+  parseCreateHiveCommand,
 } from './lib/voiceParse'
 import {
   buildConfirmation,
@@ -71,6 +74,8 @@ export default function App() {
   const [wizardStep, setWizardStep] = useState(0)
   const [form, setForm] = useState(emptyForm())
   const [showCreateHive, setShowCreateHive] = useState(false)
+  const [createHiveStep, setCreateHiveStep] = useState(null) // null | 'name' | 'location'
+  const [createHiveDraft, setCreateHiveDraft] = useState({ name: '', location: '' })
   const [inspectionKind, setInspectionKind] = useState('standard') // 'standard' | 'detailed'
   const [editingRecordId, setEditingRecordId] = useState(null)
   const [interim, setInterim] = useState('')
@@ -86,10 +91,14 @@ export default function App() {
   const hivesRef = useRef(hives)
   const inspectionKindRef = useRef('standard')
   const editingRecordIdRef = useRef(null)
+  const createHiveStepRef = useRef(null)
+  const createHiveDraftRef = useRef({ name: '', location: '' })
   const onFinalRef = useRef(() => {})
   const recRef = useRef(null)
   const shouldListenRef = useRef(false)
   const isSpeakingRef = useRef(false)
+  const speechGenerationRef = useRef(0)
+  const bargeInLockRef = useRef(false)
   const viewRef = useRef('home')
   const inputModeRef = useRef(null)
   const restartTimerRef = useRef(null)
@@ -131,6 +140,14 @@ export default function App() {
   }, [editingRecordId])
 
   useEffect(() => {
+    createHiveStepRef.current = createHiveStep
+  }, [createHiveStep])
+
+  useEffect(() => {
+    createHiveDraftRef.current = createHiveDraft
+  }, [createHiveDraft])
+
+  useEffect(() => {
     inputModeRef.current = inputMode
   }, [inputMode])
 
@@ -145,7 +162,8 @@ export default function App() {
     (delay) => {
       clearRestartTimer()
       restartTimerRef.current = setTimeout(() => {
-        if (!shouldListenRef.current || isSpeakingRef.current || !Recognition) return
+        // Stay listening during speech so user can say "Beeva" to interrupt
+        if (!shouldListenRef.current || !Recognition) return
         try {
           recRef.current?.start()
         } catch {
@@ -166,6 +184,31 @@ export default function App() {
     setListening(false)
   }, [])
 
+  const interruptSpeech = useCallback((remainder = '') => {
+    if (!isSpeakingRef.current && !window.speechSynthesis?.speaking) return false
+    if (bargeInLockRef.current) return true
+    bargeInLockRef.current = true
+    speechGenerationRef.current += 1
+    window.speechSynthesis?.cancel()
+    isSpeakingRef.current = false
+    setSpeaking(false)
+    setInterim('')
+    setLastHeard(remainder ? `${AGENT_NAME}… ${remainder}` : AGENT_NAME)
+
+    const leftover = String(remainder || '').trim()
+    if (leftover.length > 1) {
+      setTimeout(() => {
+        bargeInLockRef.current = false
+        onFinalRef.current(leftover)
+      }, 180)
+    } else {
+      setTimeout(() => {
+        bargeInLockRef.current = false
+      }, 180)
+    }
+    return true
+  }, [])
+
   const startRecognition = useCallback(() => {
     if (!Recognition || !shouldListenRef.current) return
 
@@ -173,7 +216,7 @@ export default function App() {
 
     const recognition = new Recognition()
     recognition.lang = 'en-US'
-    recognition.continuous = false
+    recognition.continuous = true
     recognition.interimResults = true
     recognition.maxAlternatives = 1
 
@@ -181,8 +224,8 @@ export default function App() {
 
     recognition.onend = () => {
       setListening(false)
-      if (shouldListenRef.current && !isSpeakingRef.current) {
-        scheduleRestart(300)
+      if (shouldListenRef.current) {
+        scheduleRestart(isSpeakingRef.current ? 120 : 300)
       }
     }
 
@@ -212,12 +255,35 @@ export default function App() {
         else interimText += piece
       }
 
-      if (interimText) setInterim(interimText.trim())
+      if (interimText) {
+        const trimmed = interimText.trim()
+        setInterim(trimmed)
+        if (isSpeakingRef.current) {
+          const wake = detectWakeWord(trimmed)
+          if (wake.hit) interruptSpeech(wake.remainder)
+        }
+      }
+
       if (finalText) {
         const cleaned = finalText.trim()
         setInterim('')
-        setLastHeard(cleaned)
-        onFinalRef.current(cleaned)
+
+        if (isSpeakingRef.current || window.speechSynthesis?.speaking) {
+          const wake = detectWakeWord(cleaned)
+          if (wake.hit) {
+            interruptSpeech(wake.remainder)
+          }
+          return
+        }
+
+        const wake = detectWakeWord(cleaned)
+        const command = wake.hit ? wake.remainder : cleaned
+        if (!command) {
+          setLastHeard(AGENT_NAME)
+          return
+        }
+        setLastHeard(command)
+        onFinalRef.current(command)
       }
     }
 
@@ -227,51 +293,67 @@ export default function App() {
     } catch {
       scheduleRestart(300)
     }
-  }, [Recognition, scheduleRestart, stopRecognition])
+  }, [Recognition, interruptSpeech, scheduleRestart, stopRecognition])
 
   const speak = useCallback(
     (text, { force = false } = {}) => {
       if (!text || typeof window === 'undefined' || !window.speechSynthesis) {
-        return Promise.resolve()
+        return Promise.resolve(false)
       }
       // Typing mode stays quiet unless forced
       if (!force && inputModeRef.current === 'typing') {
-        return Promise.resolve()
+        return Promise.resolve(false)
       }
 
       return new Promise((resolve) => {
-        stopRecognition()
+        const myGen = ++speechGenerationRef.current
+        bargeInLockRef.current = false
         isSpeakingRef.current = true
         setSpeaking(true)
+
+        // Keep mic open for "Beeva" barge-in
+        if (shouldListenRef.current) {
+          try {
+            if (!recRef.current) startRecognition()
+            else scheduleRestart(80)
+          } catch {
+            startRecognition()
+          }
+        }
 
         window.speechSynthesis.cancel()
         const utterance = new SpeechSynthesisUtterance(text)
         utterance.lang = 'en-US'
         utterance.rate = 1
 
-        utterance.onend = () => {
-          isSpeakingRef.current = false
-          setSpeaking(false)
-          if (shouldListenRef.current) {
-            scheduleRestart(250)
+        const finish = (interrupted) => {
+          if (myGen !== speechGenerationRef.current && !interrupted) {
+            resolve(true)
+            return
           }
-          resolve()
+          if (myGen === speechGenerationRef.current) {
+            isSpeakingRef.current = false
+            setSpeaking(false)
+            if (shouldListenRef.current) {
+              scheduleRestart(250)
+            }
+          }
+          resolve(Boolean(interrupted || myGen !== speechGenerationRef.current))
+        }
+
+        utterance.onend = () => {
+          finish(myGen !== speechGenerationRef.current)
         }
 
         utterance.onerror = () => {
-          isSpeakingRef.current = false
-          setSpeaking(false)
-          if (shouldListenRef.current) {
-            scheduleRestart(250)
-          }
-          resolve()
+          finish(true)
         }
 
         window.speechSynthesis.resume()
         window.speechSynthesis.speak(utterance)
       })
     },
-    [scheduleRestart, stopRecognition],
+    [scheduleRestart, startRecognition],
   )
 
   const enableListening = useCallback(() => {
@@ -324,6 +406,11 @@ export default function App() {
     selectedHiveRef.current = null
     setEditingRecordId(null)
     editingRecordIdRef.current = null
+    setShowCreateHive(false)
+    setCreateHiveStep(null)
+    createHiveStepRef.current = null
+    setCreateHiveDraft({ name: '', location: '' })
+    createHiveDraftRef.current = { name: '', location: '' }
     setForm(emptyForm())
     formRef.current = emptyForm()
     setInterim('')
@@ -447,7 +534,10 @@ export default function App() {
 
   const goToStep = useCallback(
     async (index, confirmation) => {
-      if (confirmation) await speak(confirmation)
+      if (confirmation) {
+        const stopped = await speak(confirmation)
+        if (stopped) return true
+      }
       setWizardStep(index)
       stepRef.current = index
       const steps = getActiveSteps()
@@ -457,8 +547,10 @@ export default function App() {
           inspectionKindRef.current === 'detailed'
             ? buildDetailedQuestionSpeech(step, index)
             : buildQuestionSpeech(step, index, steps)
-        await speak(speech)
+        const stopped = await speak(speech)
+        if (stopped) return true
       }
+      return false
     },
     [getActiveSteps, speak],
   )
@@ -484,7 +576,8 @@ export default function App() {
 
       const nextIndex = stepRef.current + 1
       if (nextIndex >= steps.length) {
-        await speak(confirmationText || 'Saving inspection.')
+        const stopped = await speak(confirmationText || 'Saving inspection.')
+        if (stopped) return
         await finishInspection()
         return
       }
@@ -507,7 +600,7 @@ export default function App() {
 
       enableListening()
       await speak(
-        'Voice mode selected. Say inspect followed by a hive name. After you save, say inspect again for the next hive, or say exit.',
+        `Hi, I am ${AGENT_NAME}. Say inspect followed by a hive name. While I am talking, say ${AGENT_NAME} to interrupt. After you save, say inspect again for the next hive, or say exit.`,
         { force: true },
       )
     },
@@ -550,7 +643,8 @@ export default function App() {
         kind === 'detailed'
           ? `Starting detailed inspection for ${hive.name}. Fifty-seven questions.`
           : `Starting the quick inspection checklist for ${hive.name}.`
-      await speak(intro, { force: true })
+      const stoppedIntro = await speak(intro, { force: true })
+      if (stoppedIntro) return
       const speech =
         kind === 'detailed'
           ? buildDetailedQuestionSpeech(steps[0], 0)
@@ -603,10 +697,11 @@ export default function App() {
       }
 
       enableListening()
-      await speak(
+      const stoppedEdit = await speak(
         `Editing ${kind === 'detailed' ? 'detailed' : 'quick'} inspection for ${hive.name}.`,
         { force: true },
       )
+      if (stoppedEdit) return
       const speech =
         kind === 'detailed'
           ? buildDetailedQuestionSpeech(steps[0], 0)
@@ -651,15 +746,147 @@ export default function App() {
       setHives(result.hives)
       hivesRef.current = result.hives
       setShowCreateHive(false)
+      setCreateHiveStep(null)
+      createHiveStepRef.current = null
+      setCreateHiveDraft({ name: '', location: '' })
+      createHiveDraftRef.current = { name: '', location: '' }
       if (inputModeRef.current === 'voice') {
         await speak(
-          `Hive ${result.hive.name} created. You can now inspect it.`,
+          `Hive ${result.hive.name} created${
+            result.hive.location ? ` at ${result.hive.location}` : ''
+          }. Say inspect ${result.hive.keywords?.[0] || result.hive.name} to start, or create another hive.`,
           { force: true },
         )
       }
       return result
     },
     [speak],
+  )
+
+  const cancelCreateHive = useCallback(async (announce = true) => {
+    setShowCreateHive(false)
+    setCreateHiveStep(null)
+    createHiveStepRef.current = null
+    setCreateHiveDraft({ name: '', location: '' })
+    createHiveDraftRef.current = { name: '', location: '' }
+    if (announce && inputModeRef.current === 'voice') {
+      await speak('Hive setup cancelled.', { force: true })
+    }
+  }, [speak])
+
+  const askCreateHivePrompt = useCallback(
+    async (step, draft = createHiveDraftRef.current) => {
+      if (step === 'name') {
+        await speak(
+          `Let's create a hive. What is the hive name or ID?`,
+          { force: true },
+        )
+      } else if (step === 'location') {
+        await speak(
+          `Got it. ${draft.name}. What is the apiary location? Say the location, or say skip if there is none.`,
+          { force: true },
+        )
+      }
+    },
+    [speak],
+  )
+
+  const startCreateHive = useCallback(async () => {
+    setShowCreateHive(true)
+    setCreateHiveDraft({ name: '', location: '' })
+    createHiveDraftRef.current = { name: '', location: '' }
+
+    if (inputModeRef.current !== 'voice') {
+      setCreateHiveStep(null)
+      createHiveStepRef.current = null
+      return
+    }
+
+    setCreateHiveStep('name')
+    createHiveStepRef.current = 'name'
+    enableListening()
+    await askCreateHivePrompt('name')
+  }, [askCreateHivePrompt, enableListening])
+
+  const handleCreateHiveFinal = useCallback(
+    async (transcript) => {
+      const step = createHiveStepRef.current
+      if (!step) return
+
+      const cmd = parseCreateHiveCommand(transcript, step)
+
+      if (cmd.type === 'cancel') {
+        await cancelCreateHive(true)
+        return
+      }
+
+      if (cmd.type === 'repeat') {
+        await askCreateHivePrompt(step, createHiveDraftRef.current)
+        return
+      }
+
+      if (step === 'name') {
+        if (cmd.type === 'confirm') {
+          if (!createHiveDraftRef.current.name) {
+            await speak('Please say the hive name first.', { force: true })
+            return
+          }
+          setCreateHiveStep('location')
+          createHiveStepRef.current = 'location'
+          await askCreateHivePrompt('location', createHiveDraftRef.current)
+          return
+        }
+        if (cmd.type !== 'value') {
+          await speak('Please say the hive name.', { force: true })
+          return
+        }
+        const nextDraft = {
+          ...createHiveDraftRef.current,
+          name: cmd.value,
+        }
+        setCreateHiveDraft(nextDraft)
+        createHiveDraftRef.current = nextDraft
+        setCreateHiveStep('location')
+        createHiveStepRef.current = 'location'
+        await askCreateHivePrompt('location', nextDraft)
+        return
+      }
+
+      if (step === 'location') {
+        if (cmd.type === 'skip' || (cmd.type === 'confirm' && !createHiveDraftRef.current.location)) {
+          await handleAddHive({
+            name: createHiveDraftRef.current.name,
+            location: '',
+          })
+          return
+        }
+        if (cmd.type === 'confirm') {
+          await handleAddHive({
+            name: createHiveDraftRef.current.name,
+            location: createHiveDraftRef.current.location,
+          })
+          return
+        }
+        if (cmd.type !== 'value') {
+          await speak(
+            'Say the location, or say skip.',
+            { force: true },
+          )
+          return
+        }
+        const nextDraft = {
+          ...createHiveDraftRef.current,
+          location: cmd.value,
+        }
+        setCreateHiveDraft(nextDraft)
+        createHiveDraftRef.current = nextDraft
+        await handleAddHive({
+          name: nextDraft.name,
+          location: nextDraft.location,
+        })
+      }
+    },
+    [askCreateHivePrompt, cancelCreateHive, handleAddHive, speak],
   )
 
   const handleDeleteHive = useCallback(
@@ -683,6 +910,12 @@ export default function App() {
   const handleDashboardFinal = useCallback(
     async (transcript) => {
       if (inputModeRef.current !== 'voice') return
+
+      if (createHiveStepRef.current) {
+        await handleCreateHiveFinal(transcript)
+        return
+      }
+
       const cmd = parseDashboardCommand(transcript, hivesRef.current)
       if (cmd.type === 'exit') {
         goToHome()
@@ -691,11 +924,7 @@ export default function App() {
       } else if (cmd.type === 'continue') {
         await speak(buildContinuePrompt(hivesRef.current), { force: true })
       } else if (cmd.type === 'add_hive') {
-        setShowCreateHive(true)
-        await speak(
-          'Open the create hive form. Enter the hive name and location, then save.',
-          { force: true },
-        )
+        await startCreateHive()
       } else if (cmd.type === 'detailed' && cmd.hive) {
         await startWizard(cmd.hive, 'detailed')
       } else if (cmd.type === 'inspect' && cmd.hive) {
@@ -704,21 +933,20 @@ export default function App() {
         await openHistory(cmd.hive)
       } else if (!hivesRef.current.length) {
         await speak(
-          'No hives yet. Create a hive first before you can inspect.',
+          'No hives yet. Say create hive, then tell me the name and location.',
           { force: true },
         )
       } else {
-        await speak(
-          buildContinuePrompt(hivesRef.current),
-          { force: true },
-        )
+        await speak(buildContinuePrompt(hivesRef.current), { force: true })
       }
     },
     [
       disableListening,
       goToHome,
+      handleCreateHiveFinal,
       openHistory,
       speak,
+      startCreateHive,
       startWizard,
     ],
   )
@@ -932,6 +1160,10 @@ export default function App() {
     setForm(emptyForm())
     formRef.current = emptyForm()
     setShowCreateHive(false)
+    setCreateHiveStep(null)
+    createHiveStepRef.current = null
+    setCreateHiveDraft({ name: '', location: '' })
+    createHiveDraftRef.current = { name: '', location: '' }
     setInterim('')
     setLastHeard('')
     setMicError(null)
@@ -1002,7 +1234,13 @@ export default function App() {
     (view === 'home' ||
       (inputMode === 'voice' &&
         (view === 'dashboard' || view === 'wizard' || view === 'history')))
-  const micLabel = !micOn ? 'Mic off' : speaking ? 'Speaking' : listening ? 'Listening' : 'Ready'
+  const micLabel = !micOn
+    ? 'Mic off'
+    : speaking
+      ? `${AGENT_NAME} speaking`
+      : listening
+        ? 'Listening'
+        : 'Ready'
   const micClass = !micOn ? 'off' : speaking ? 'speaking' : listening ? 'listening' : 'idle'
 
   if (!session) {
@@ -1066,7 +1304,10 @@ export default function App() {
           inspections={inspections}
           inputMode={inputMode}
           showCreateHive={showCreateHive}
-          onShowCreateHive={setShowCreateHive}
+          createHiveStep={createHiveStep}
+          createHiveDraft={createHiveDraft}
+          onStartCreateHive={startCreateHive}
+          onCancelCreateHive={() => cancelCreateHive(inputMode === 'voice')}
           onAddHive={handleAddHive}
           onDeleteHive={handleDeleteHive}
           onInspect={(hive) => startWizard(hive, 'standard')}
@@ -1216,7 +1457,7 @@ function Header({
               : inputMode === 'typing'
                 ? 'Typing mode'
                 : inputMode === 'voice'
-                  ? 'Voice mode'
+                  ? `${AGENT_NAME} · Voice`
                   : 'Hands-free Records'}
           </p>
         </div>
@@ -1295,7 +1536,10 @@ function Dashboard({
   inspections,
   inputMode,
   showCreateHive,
-  onShowCreateHive,
+  createHiveStep,
+  createHiveDraft,
+  onStartCreateHive,
+  onCancelCreateHive,
   onAddHive,
   onDeleteHive,
   onInspect,
@@ -1306,6 +1550,8 @@ function Dashboard({
   const [name, setName] = useState('')
   const [location, setLocation] = useState('')
   const [error, setError] = useState('')
+  const isVoice = inputMode === 'voice'
+  const voiceCreating = isVoice && Boolean(createHiveStep)
 
   const submitHive = async (e) => {
     e?.preventDefault()
@@ -1322,8 +1568,8 @@ function Dashboard({
   return (
     <main className="dashboard">
       <div className="dashboard-mode-bar">
-        <span className={`mode-badge ${inputMode === 'typing' ? 'typing' : 'voice'}`}>
-          {inputMode === 'typing' ? 'Typing mode' : 'Voice mode'}
+        <span className={`mode-badge ${isVoice ? 'voice' : 'typing'}`}>
+          {isVoice ? `${AGENT_NAME} · Voice mode` : 'Typing mode'}
         </span>
         <button type="button" className="change-mode-link" onClick={onChangeMode}>
           Change mode
@@ -1334,8 +1580,8 @@ function Dashboard({
         <div>
           <h2 className="setup-title">Your hives</h2>
           <p className="dashboard-intro">
-            {inputMode === 'voice'
-              ? 'After each save, say inspect and a hive name to continue, or say exit.'
+            {isVoice
+              ? `Say create hive, then speak the name and location. Say ${AGENT_NAME} to interrupt.`
               : 'Create a hive first. Inspect is available only after a hive exists.'}
           </p>
         </div>
@@ -1343,15 +1589,74 @@ function Dashboard({
           type="button"
           className="btn primary create-hive-btn"
           onClick={() => {
-            onShowCreateHive(true)
             setError('')
+            onStartCreateHive()
           }}
         >
           + Create hive
         </button>
       </div>
 
-      {showCreateHive && (
+      {showCreateHive && voiceCreating && (
+        <div className="create-hive-form voice-create-panel">
+          <h3>New hive · voice</h3>
+          <p className="voice-create-step">
+            {createHiveStep === 'name'
+              ? `${AGENT_NAME} is asking for the hive name`
+              : `${AGENT_NAME} is asking for the location`}
+          </p>
+          <div className="voice-create-fields">
+            <div className={`header-field ${createHiveDraft.name ? 'filled' : ''}`}>
+              <span className="header-field-label">Name</span>
+              <span className="header-field-value">
+                {createHiveDraft.name || '—'}
+              </span>
+            </div>
+            <div
+              className={`header-field ${createHiveDraft.location ? 'filled' : ''}`}
+            >
+              <span className="header-field-label">Location</span>
+              <span className="header-field-value">
+                {createHiveDraft.location ||
+                  (createHiveStep === 'location' ? 'Waiting…' : '—')}
+              </span>
+            </div>
+          </div>
+          <p className="voice-hint">
+            {createHiveStep === 'name'
+              ? 'Say the hive name, e.g. “Orchard 1”'
+              : 'Say the location, or say “skip”'}
+          </p>
+          <div className="command-strip">
+            <span>Say:</span>
+            {createHiveStep === 'name' ? (
+              <>
+                <kbd>hive name</kbd>
+                <kbd>repeat</kbd>
+                <kbd>cancel</kbd>
+              </>
+            ) : (
+              <>
+                <kbd>location</kbd>
+                <kbd>skip</kbd>
+                <kbd>repeat</kbd>
+                <kbd>cancel</kbd>
+              </>
+            )}
+          </div>
+          <div className="create-hive-actions">
+            <button
+              type="button"
+              className="btn secondary"
+              onClick={() => onCancelCreateHive()}
+            >
+              Cancel
+            </button>
+          </div>
+        </div>
+      )}
+
+      {showCreateHive && !isVoice && (
         <form className="create-hive-form" onSubmit={submitHive}>
           <h3>New hive</h3>
           <label>
@@ -1383,7 +1688,7 @@ function Dashboard({
               type="button"
               className="btn secondary"
               onClick={() => {
-                onShowCreateHive(false)
+                onCancelCreateHive()
                 setError('')
               }}
             >
@@ -1397,13 +1702,15 @@ function Dashboard({
         <div className="empty-hives">
           <p className="empty-hives-title">No hives yet</p>
           <p className="empty-hives-text">
-            Set up your apiary by creating a hive. Until then, inspection stays locked.
+            {isVoice
+              ? `Say “create hive”, then speak the name and location.`
+              : 'Set up your apiary by creating a hive. Until then, inspection stays locked.'}
           </p>
           {!showCreateHive && (
             <button
               type="button"
               className="btn primary"
-              onClick={() => onShowCreateHive(true)}
+              onClick={() => onStartCreateHive()}
             >
               Create your first hive
             </button>
@@ -1431,9 +1738,10 @@ function Dashboard({
                   )}
                 </div>
                 <p className="hive-summary">{formatLastSummary(last)}</p>
-                {inputMode === 'voice' && (
+                {isVoice && (
                   <p className="voice-hint">
-                    “inspect {voiceWord}” · “continue {voiceWord}” · “exit”
+                    “inspect {voiceWord}” · “continue {voiceWord}” · “exit” · “
+                    {AGENT_NAME}” to interrupt
                   </p>
                 )}
                 <div className="card-actions three">
@@ -1513,7 +1821,7 @@ function Wizard({
   return (
     <main className="wizard">
       <div className={`mode-badge wizard-mode ${isTyping ? 'typing' : 'voice'}`}>
-        {isEditing ? 'Editing' : isTyping ? 'Typing' : 'Voice'}
+        {isEditing ? 'Editing' : isTyping ? 'Typing' : AGENT_NAME}
         {' · '}
         {isDetailed ? 'Detailed inspection' : 'Quick inspection'}
       </div>
@@ -1601,6 +1909,7 @@ function Wizard({
       {!isTyping && (
         <div className="command-strip">
           <span>Say:</span>
+          <kbd>{AGENT_NAME}</kbd>
           <kbd>your answer</kbd>
           <kbd>next</kbd>
           <kbd>back</kbd>
@@ -1609,6 +1918,11 @@ function Wizard({
           <kbd>cancel</kbd>
           {isLast && <kbd>save</kbd>}
         </div>
+      )}
+      {!isTyping && (
+        <p className="voice-hint center barge-hint">
+          While {AGENT_NAME} is speaking, say “{AGENT_NAME}” to interrupt
+        </p>
       )}
     </main>
   )

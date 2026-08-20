@@ -116,8 +116,8 @@
   gap: 0.35rem;
 }
 
-.logout-link {
-  color: var(--muted-foreground);
+.barge-hint {
+  margin-top: 0.75rem;
 }
 
 /* ── Header ── */
@@ -173,6 +173,10 @@
   font-weight: 600;
   font-size: 0.92rem;
   padding: 0.35rem 0.5rem;
+}
+
+.logout-link {
+  color: var(--muted-foreground);
 }
 
 .mic-badge {
@@ -578,6 +582,28 @@
   display: grid;
   grid-template-columns: 1.3fr 1fr;
   gap: 0.65rem;
+}
+
+.voice-create-panel .create-hive-actions {
+  grid-template-columns: 1fr;
+}
+
+.voice-create-step {
+  margin: 0;
+  color: var(--muted-foreground);
+  font-size: 0.95rem;
+}
+
+.voice-create-fields {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 0.65rem;
+}
+
+@media (max-width: 520px) {
+  .voice-create-fields {
+    grid-template-columns: 1fr;
+  }
 }
 
 .form-error {
