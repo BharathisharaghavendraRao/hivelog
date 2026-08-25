@@ -16,7 +16,7 @@ import {
   AGENT_NAME,
   buildContinuePrompt,
   buildPostSavePrompt,
-  detectWakeWord,
+  processBeevaProtocol,
   parseDashboardCommand,
   parseModeCommand,
   parseWizardCommand,
@@ -99,6 +99,8 @@ export default function App() {
   const isSpeakingRef = useRef(false)
   const speechGenerationRef = useRef(0)
   const bargeInLockRef = useRef(false)
+  const beevaStateRef = useRef({ armed: false, buffer: '' })
+  const speakIgnoreUntilRef = useRef(0)
   const viewRef = useRef('home')
   const inputModeRef = useRef(null)
   const restartTimerRef = useRef(null)
@@ -184,7 +186,11 @@ export default function App() {
     setListening(false)
   }, [])
 
-  const interruptSpeech = useCallback((remainder = '') => {
+  const resetBeevaCapture = useCallback(() => {
+    beevaStateRef.current = { armed: false, buffer: '' }
+  }, [])
+
+  const interruptSpeech = useCallback(() => {
     if (!isSpeakingRef.current && !window.speechSynthesis?.speaking) return false
     if (bargeInLockRef.current) return true
     bargeInLockRef.current = true
@@ -193,19 +199,10 @@ export default function App() {
     isSpeakingRef.current = false
     setSpeaking(false)
     setInterim('')
-    setLastHeard(remainder ? `${AGENT_NAME}… ${remainder}` : AGENT_NAME)
-
-    const leftover = String(remainder || '').trim()
-    if (leftover.length > 1) {
-      setTimeout(() => {
-        bargeInLockRef.current = false
-        onFinalRef.current(leftover)
-      }, 180)
-    } else {
-      setTimeout(() => {
-        bargeInLockRef.current = false
-      }, 180)
-    }
+    setLastHeard(`${AGENT_NAME} — listening… say over when finished`)
+    setTimeout(() => {
+      bargeInLockRef.current = false
+    }, 200)
     return true
   }, [])
 
@@ -216,7 +213,8 @@ export default function App() {
 
     const recognition = new Recognition()
     recognition.lang = 'en-US'
-    recognition.continuous = true
+    // Single utterances; we restart. Continuous mode dumps garbage into fields.
+    recognition.continuous = false
     recognition.interimResults = true
     recognition.maxAlternatives = 1
 
@@ -225,7 +223,8 @@ export default function App() {
     recognition.onend = () => {
       setListening(false)
       if (shouldListenRef.current) {
-        scheduleRestart(isSpeakingRef.current ? 120 : 300)
+        // While Beeva speaks, restart faster only to catch the wake word
+        scheduleRestart(isSpeakingRef.current ? 200 : 350)
       }
     }
 
@@ -255,34 +254,79 @@ export default function App() {
         else interimText += piece
       }
 
+      // Ignore speaker echo while Beeva is talking (brief lock after TTS starts)
+      const echoLocked = Date.now() < speakIgnoreUntilRef.current
+
       if (interimText) {
         const trimmed = interimText.trim()
-        setInterim(trimmed)
-        if (isSpeakingRef.current) {
-          const wake = detectWakeWord(trimmed)
-          if (wake.hit) interruptSpeech(wake.remainder)
+        const preview = processBeevaProtocol(trimmed, beevaStateRef.current)
+        if (preview.event !== 'ignore') {
+          setInterim(
+            preview.event === 'armed'
+              ? `${AGENT_NAME}…`
+              : `${AGENT_NAME} ${preview.display || '…'}`.trim(),
+          )
+        } else if (!isSpeakingRef.current) {
+          setInterim('')
+        }
+
+        // Barge-in: only the wake word can stop TTS
+        if (
+          !echoLocked &&
+          isSpeakingRef.current &&
+          (preview.event === 'armed' ||
+            preview.event === 'listening' ||
+            preview.event === 'submit')
+        ) {
+          interruptSpeech()
+          beevaStateRef.current = {
+            armed: true,
+            buffer: preview.buffer || '',
+          }
         }
       }
 
-      if (finalText) {
-        const cleaned = finalText.trim()
-        setInterim('')
+      if (!finalText) return
 
-        if (isSpeakingRef.current || window.speechSynthesis?.speaking) {
-          const wake = detectWakeWord(cleaned)
-          if (wake.hit) {
-            interruptSpeech(wake.remainder)
-          }
-          return
-        }
+      const cleaned = finalText.trim()
+      setInterim('')
 
-        const wake = detectWakeWord(cleaned)
-        const command = wake.hit ? wake.remainder : cleaned
+      if (echoLocked && isSpeakingRef.current) {
+        // Drop echo of Beeva's own voice
+        return
+      }
+
+      const next = processBeevaProtocol(cleaned, beevaStateRef.current)
+      beevaStateRef.current = { armed: next.armed, buffer: next.buffer }
+
+      if (next.event === 'ignore') {
+        // Do not write random speech into answers
+        return
+      }
+
+      if (isSpeakingRef.current) {
+        interruptSpeech()
+      }
+
+      if (next.event === 'armed') {
+        setLastHeard(`${AGENT_NAME} — go ahead, then say over`)
+        return
+      }
+
+      if (next.event === 'listening') {
+        setLastHeard(`${AGENT_NAME} ${next.display} …`)
+        return
+      }
+
+      if (next.event === 'submit') {
+        const command = (next.command || '').trim()
         if (!command) {
-          setLastHeard(AGENT_NAME)
+          setLastHeard(`${AGENT_NAME} … over (empty — try again)`)
+          resetBeevaCapture()
           return
         }
-        setLastHeard(command)
+        setLastHeard(`${AGENT_NAME} ${command} over`)
+        resetBeevaCapture()
         onFinalRef.current(command)
       }
     }
@@ -293,7 +337,13 @@ export default function App() {
     } catch {
       scheduleRestart(300)
     }
-  }, [Recognition, interruptSpeech, scheduleRestart, stopRecognition])
+  }, [
+    Recognition,
+    interruptSpeech,
+    resetBeevaCapture,
+    scheduleRestart,
+    stopRecognition,
+  ])
 
   const speak = useCallback(
     (text, { force = false } = {}) => {
@@ -308,14 +358,17 @@ export default function App() {
       return new Promise((resolve) => {
         const myGen = ++speechGenerationRef.current
         bargeInLockRef.current = false
+        resetBeevaCapture()
         isSpeakingRef.current = true
         setSpeaking(true)
+        // Block wake/echo for a short window so TTS is not heard as commands
+        speakIgnoreUntilRef.current = Date.now() + 600
 
-        // Keep mic open for "Beeva" barge-in
+        // Keep mic open so user can say "Beeva" to interrupt
         if (shouldListenRef.current) {
           try {
             if (!recRef.current) startRecognition()
-            else scheduleRestart(80)
+            else scheduleRestart(120)
           } catch {
             startRecognition()
           }
@@ -335,7 +388,7 @@ export default function App() {
             isSpeakingRef.current = false
             setSpeaking(false)
             if (shouldListenRef.current) {
-              scheduleRestart(250)
+              scheduleRestart(300)
             }
           }
           resolve(Boolean(interrupted || myGen !== speechGenerationRef.current))
@@ -353,7 +406,7 @@ export default function App() {
         window.speechSynthesis.speak(utterance)
       })
     },
-    [scheduleRestart, startRecognition],
+    [resetBeevaCapture, scheduleRestart, startRecognition],
   )
 
   const enableListening = useCallback(() => {
@@ -369,6 +422,7 @@ export default function App() {
     window.speechSynthesis?.cancel()
     isSpeakingRef.current = false
     setSpeaking(false)
+    beevaStateRef.current = { armed: false, buffer: '' }
   }, [stopRecognition])
 
   const updateFormField = useCallback((field, value) => {
@@ -600,7 +654,7 @@ export default function App() {
 
       enableListening()
       await speak(
-        `Hi, I am ${AGENT_NAME}. Say inspect followed by a hive name. While I am talking, say ${AGENT_NAME} to interrupt. After you save, say inspect again for the next hive, or say exit.`,
+        `Hi, I am ${AGENT_NAME}. Always speak like this: say ${AGENT_NAME}, then your answer, then say over. For example: ${AGENT_NAME} inspect orchard one over. Or ${AGENT_NAME} create hive over.`,
         { force: true },
       )
     },
@@ -778,12 +832,12 @@ export default function App() {
     async (step, draft = createHiveDraftRef.current) => {
       if (step === 'name') {
         await speak(
-          `Let's create a hive. What is the hive name or ID?`,
+          `Let's create a hive. Say ${AGENT_NAME}, then the hive name, then over.`,
           { force: true },
         )
       } else if (step === 'location') {
         await speak(
-          `Got it. ${draft.name}. What is the apiary location? Say the location, or say skip if there is none.`,
+          `Got it. ${draft.name}. Say ${AGENT_NAME}, then the location, then over. Or say ${AGENT_NAME} skip over.`,
           { force: true },
         )
       }
@@ -1525,7 +1579,7 @@ function HomeScreen({ onChoose, sttSupported }) {
       </div>
 
       {sttSupported && (
-        <p className="voice-hint center">Or say “typing” or “voice”</p>
+        <p className="voice-hint center">Or say “{AGENT_NAME} typing over” / “{AGENT_NAME} voice over”</p>
       )}
     </main>
   )
@@ -1581,7 +1635,7 @@ function Dashboard({
           <h2 className="setup-title">Your hives</h2>
           <p className="dashboard-intro">
             {isVoice
-              ? `Say create hive, then speak the name and location. Say ${AGENT_NAME} to interrupt.`
+              ? `Always say “${AGENT_NAME} … over”. Example: “${AGENT_NAME} create hive over”.`
               : 'Create a hive first. Inspect is available only after a hive exists.'}
           </p>
         </div>
@@ -1624,25 +1678,15 @@ function Dashboard({
           </div>
           <p className="voice-hint">
             {createHiveStep === 'name'
-              ? 'Say the hive name, e.g. “Orchard 1”'
-              : 'Say the location, or say “skip”'}
+              ? `Say “${AGENT_NAME} Orchard 1 over”`
+              : `Say “${AGENT_NAME} North field over” or “${AGENT_NAME} skip over”`}
           </p>
           <div className="command-strip">
             <span>Say:</span>
-            {createHiveStep === 'name' ? (
-              <>
-                <kbd>hive name</kbd>
-                <kbd>repeat</kbd>
-                <kbd>cancel</kbd>
-              </>
-            ) : (
-              <>
-                <kbd>location</kbd>
-                <kbd>skip</kbd>
-                <kbd>repeat</kbd>
-                <kbd>cancel</kbd>
-              </>
-            )}
+            <kbd>{AGENT_NAME}</kbd>
+            <kbd>your words</kbd>
+            <kbd>over</kbd>
+            <kbd>cancel</kbd>
           </div>
           <div className="create-hive-actions">
             <button
@@ -1703,7 +1747,7 @@ function Dashboard({
           <p className="empty-hives-title">No hives yet</p>
           <p className="empty-hives-text">
             {isVoice
-              ? `Say “create hive”, then speak the name and location.`
+              ? `Say “create hive” using “${AGENT_NAME} create hive over”.`
               : 'Set up your apiary by creating a hive. Until then, inspection stays locked.'}
           </p>
           {!showCreateHive && (
@@ -1740,8 +1784,8 @@ function Dashboard({
                 <p className="hive-summary">{formatLastSummary(last)}</p>
                 {isVoice && (
                   <p className="voice-hint">
-                    “inspect {voiceWord}” · “continue {voiceWord}” · “exit” · “
-                    {AGENT_NAME}” to interrupt
+                    “{AGENT_NAME} inspect {voiceWord} over” · “{AGENT_NAME} exit
+                    over”
                   </p>
                 )}
                 <div className="card-actions three">
@@ -1910,18 +1954,17 @@ function Wizard({
         <div className="command-strip">
           <span>Say:</span>
           <kbd>{AGENT_NAME}</kbd>
-          <kbd>your answer</kbd>
+          <kbd>answer</kbd>
+          <kbd>over</kbd>
           <kbd>next</kbd>
           <kbd>back</kbd>
-          <kbd>repeat</kbd>
           <kbd>skip</kbd>
-          <kbd>cancel</kbd>
           {isLast && <kbd>save</kbd>}
         </div>
       )}
       {!isTyping && (
         <p className="voice-hint center barge-hint">
-          While {AGENT_NAME} is speaking, say “{AGENT_NAME}” to interrupt
+          Example: “{AGENT_NAME} cloudy over” · interrupt with “{AGENT_NAME}”
         </p>
       )}
     </main>

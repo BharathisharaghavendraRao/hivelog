@@ -2,9 +2,11 @@ function normalize(text) {
   return text.toLowerCase().replace(/[.,!?']/g, ' ').replace(/\s+/g, ' ').trim()
 }
 
-/** Voice agent name — say this to interrupt while Beeva is speaking. */
+/** Voice agent name — say this to interrupt / start a command. */
 export const AGENT_NAME = 'Beeva'
-export const AGENT_WAKE_WORDS = ['beeva', 'beava', 'beva', 'biva']
+export const AGENT_WAKE_WORDS = ['beeva', 'beava', 'beva', 'biva', 'viva']
+/** End marker — say this after your answer to submit it. */
+export const END_WORDS = ['over', 'over and out']
 
 function hasPhrase(text, phrase) {
   const n = normalize(phrase)
@@ -15,21 +17,109 @@ function hasPhrase(text, phrase) {
   )
 }
 
+function stripWakeWords(text) {
+  let out = text
+  for (const word of AGENT_WAKE_WORDS) {
+    out = out.replace(new RegExp(`\\b${word}\\b`, 'g'), ' ')
+  }
+  return out.replace(/\s+/g, ' ').trim()
+}
+
+function stripEndWords(text) {
+  let out = text
+  // longer phrases first
+  const ends = [...END_WORDS].sort((a, b) => b.length - a.length)
+  for (const word of ends) {
+    out = out.replace(new RegExp(`\\b${word.replace(/\s+/g, '\\s+')}\\b`, 'g'), ' ')
+  }
+  return out.replace(/\s+/g, ' ').trim()
+}
+
+function hasWakeWord(text) {
+  return AGENT_WAKE_WORDS.some((w) => hasPhrase(text, w))
+}
+
+function hasEndWord(text) {
+  return END_WORDS.some((w) => hasPhrase(text, w))
+}
+
 /** Detect wake word and return any command spoken after it. */
 export function detectWakeWord(transcript) {
   const text = normalize(transcript)
   if (!text) return { hit: false, remainder: '' }
+  if (!hasWakeWord(text)) return { hit: false, remainder: text }
+  return { hit: true, remainder: stripWakeWords(text) }
+}
 
-  for (const word of AGENT_WAKE_WORDS) {
-    if (!hasPhrase(text, word)) continue
-    const remainder = text
-      .replace(new RegExp(`\\b${word}\\b`, 'g'), ' ')
-      .replace(/\s+/g, ' ')
-      .trim()
-    return { hit: true, remainder }
+/**
+ * Push-to-talk style protocol:
+ *   "Beeva cloudy over"  → submit "cloudy"
+ *   "Beeva"              → arm / interrupt only
+ * Speech without Beeva is ignored. Speech without "over" is not submitted.
+ *
+ * @param {string} chunk - new speech chunk
+ * @param {{ armed: boolean, buffer: string }} state
+ */
+export function processBeevaProtocol(chunk, state = { armed: false, buffer: '' }) {
+  const text = normalize(chunk)
+  if (!text) {
+    return {
+      ...state,
+      event: 'ignore',
+      command: '',
+      display: state.buffer,
+    }
   }
 
-  return { hit: false, remainder: text }
+  let armed = state.armed
+  let buffer = state.buffer || ''
+
+  if (hasWakeWord(text)) {
+    armed = true
+    // Keep only what comes after the (last) wake word in this chunk
+    const afterWake = stripWakeWords(text)
+    // Fresh command after a new wake word
+    buffer = afterWake
+  } else if (armed) {
+    buffer = `${buffer} ${text}`.replace(/\s+/g, ' ').trim()
+  } else {
+    return {
+      armed: false,
+      buffer: '',
+      event: 'ignore',
+      command: '',
+      display: '',
+    }
+  }
+
+  if (hasEndWord(buffer) || hasEndWord(text)) {
+    const command = stripEndWords(stripWakeWords(buffer))
+    return {
+      armed: false,
+      buffer: '',
+      event: 'submit',
+      command,
+      display: command,
+    }
+  }
+
+  if (hasWakeWord(text) && !buffer) {
+    return {
+      armed: true,
+      buffer: '',
+      event: 'armed',
+      command: '',
+      display: '',
+    }
+  }
+
+  return {
+    armed: true,
+    buffer,
+    event: 'listening',
+    command: '',
+    display: buffer,
+  }
 }
 
 export function matchHive(transcript, hives = []) {
@@ -137,10 +227,10 @@ export function buildPostSavePrompt(savedHive, hives = []) {
   const nextWord = next?.keywords?.[0] || next?.name || name
 
   if (hives.length === 1) {
-    return `Inspection saved for ${name}. Say inspect ${nextWord} to continue, or say exit.`
+    return `Inspection saved for ${name}. Say Beeva inspect ${nextWord} over to continue, or Beeva exit over.`
   }
 
-  return `Inspection saved for ${name}. Say inspect ${nextWord} to continue with the next hive, or say exit when you are done.`
+  return `Inspection saved for ${name}. Say Beeva inspect ${nextWord} over for the next hive, or Beeva exit over.`
 }
 
 /** Reminder when user says continue without a hive name. */
@@ -151,13 +241,13 @@ export function buildContinuePrompt(hives = []) {
   const first = hives[0]
   const word = first.keywords?.[0] || first.name
   if (hives.length === 1) {
-    return `Say inspect ${word} to continue, or say exit.`
+    return `Say Beeva inspect ${word} over to continue, or Beeva exit over.`
   }
   const names = hives
     .slice(0, 3)
     .map((h) => h.keywords?.[0] || h.name)
     .join(', ')
-  return `Say inspect and the hive name to continue — for example inspect ${word}. Available: ${names}. Or say exit.`
+  return `Say Beeva inspect and the hive name over — for example Beeva inspect ${word} over. Available: ${names}. Or Beeva exit over.`
 }
 
 export function parseModeCommand(transcript) {
