@@ -13,15 +13,14 @@ import {
 } from './lib/seedData'
 import {
   appendTextField,
-  AGENT_NAME,
   buildContinuePrompt,
   buildPostSavePrompt,
-  processBeevaProtocol,
   parseDashboardCommand,
   parseModeCommand,
   parseWizardCommand,
   parseCreateHiveCommand,
 } from './lib/voiceParse'
+import { useVoiceEngine, AGENT_NAME } from './lib/useVoiceEngine'
 import {
   buildConfirmation,
   buildQuestionSpeech,
@@ -42,10 +41,6 @@ import {
 import { loadSession, login as authLogin, logout as authLogout } from './lib/auth'
 import './App.css'
 
-function getRecognitionCtor() {
-  if (typeof window === 'undefined') return null
-  return window.SpeechRecognition || window.webkitSpeechRecognition || null
-}
 
 function formatDate(iso) {
   return new Date(iso).toLocaleDateString(undefined, {
@@ -62,9 +57,6 @@ function capitalize(s) {
 }
 
 export default function App() {
-  const Recognition = getRecognitionCtor()
-  const sttSupported = Boolean(Recognition)
-
   const [session, setSession] = useState(() => loadSession())
   const [view, setView] = useState('home')
   const [inputMode, setInputMode] = useState(null) // 'voice' | 'typing' | null
@@ -78,11 +70,6 @@ export default function App() {
   const [createHiveDraft, setCreateHiveDraft] = useState({ name: '', location: '' })
   const [inspectionKind, setInspectionKind] = useState('standard') // 'standard' | 'detailed'
   const [editingRecordId, setEditingRecordId] = useState(null)
-  const [interim, setInterim] = useState('')
-  const [lastHeard, setLastHeard] = useState('')
-  const [listening, setListening] = useState(false)
-  const [speaking, setSpeaking] = useState(false)
-  const [micError, setMicError] = useState(null)
   const [micOn, setMicOn] = useState(false)
 
   const stepRef = useRef(0)
@@ -94,16 +81,36 @@ export default function App() {
   const createHiveStepRef = useRef(null)
   const createHiveDraftRef = useRef({ name: '', location: '' })
   const onFinalRef = useRef(() => {})
-  const recRef = useRef(null)
-  const shouldListenRef = useRef(false)
-  const isSpeakingRef = useRef(false)
-  const speechGenerationRef = useRef(0)
-  const bargeInLockRef = useRef(false)
-  const beevaStateRef = useRef({ armed: false, buffer: '' })
-  const speakIgnoreUntilRef = useRef(0)
   const viewRef = useRef('home')
   const inputModeRef = useRef(null)
-  const restartTimerRef = useRef(null)
+
+  // ── Voice engine (react-speech-recognition based) ───────────────────────
+  const voice = useVoiceEngine({
+    onCommand: useCallback((cmd) => onFinalRef.current(cmd), []),
+    enabled: micOn,
+  })
+
+  const { listening, speaking, interim, lastHeard, micError, speak: voiceSpeak,
+          stopSpeaking, browserSupportsSpeechRecognition } = voice
+  const sttSupported = browserSupportsSpeechRecognition
+
+  // speak() wrapper: only speaks in voice mode unless forced
+  const speak = useCallback(
+    (text, { force = false } = {}) => {
+      if (!force && inputModeRef.current !== 'voice') return Promise.resolve()
+      return voiceSpeak(text, { force: true })
+    },
+    [voiceSpeak],
+  )
+
+  const enableListening = useCallback(() => {
+    setMicOn(true)
+  }, [])
+
+  const disableListening = useCallback(() => {
+    setMicOn(false)
+    stopSpeaking()
+  }, [stopSpeaking])
 
   const getActiveSteps = useCallback(
     () =>
@@ -113,317 +120,16 @@ export default function App() {
     [],
   )
 
-  useEffect(() => {
-    stepRef.current = wizardStep
-  }, [wizardStep])
-
-  useEffect(() => {
-    formRef.current = form
-  }, [form])
-
-  useEffect(() => {
-    selectedHiveRef.current = selectedHiveId
-  }, [selectedHiveId])
-
-  useEffect(() => {
-    hivesRef.current = hives
-  }, [hives])
-
-  useEffect(() => {
-    viewRef.current = view
-  }, [view])
-
-  useEffect(() => {
-    inspectionKindRef.current = inspectionKind
-  }, [inspectionKind])
-
-  useEffect(() => {
-    editingRecordIdRef.current = editingRecordId
-  }, [editingRecordId])
-
-  useEffect(() => {
-    createHiveStepRef.current = createHiveStep
-  }, [createHiveStep])
-
-  useEffect(() => {
-    createHiveDraftRef.current = createHiveDraft
-  }, [createHiveDraft])
-
-  useEffect(() => {
-    inputModeRef.current = inputMode
-  }, [inputMode])
-
-  const clearRestartTimer = () => {
-    if (restartTimerRef.current) {
-      clearTimeout(restartTimerRef.current)
-      restartTimerRef.current = null
-    }
-  }
-
-  const scheduleRestart = useCallback(
-    (delay) => {
-      clearRestartTimer()
-      restartTimerRef.current = setTimeout(() => {
-        // Stay listening during speech so user can say "Beeva" to interrupt
-        if (!shouldListenRef.current || !Recognition) return
-        try {
-          recRef.current?.start()
-        } catch {
-          /* already running */
-        }
-      }, delay)
-    },
-    [Recognition],
-  )
-
-  const stopRecognition = useCallback(() => {
-    clearRestartTimer()
-    try {
-      recRef.current?.stop()
-    } catch {
-      /* ignore */
-    }
-    setListening(false)
-  }, [])
-
-  const resetBeevaCapture = useCallback(() => {
-    beevaStateRef.current = { armed: false, buffer: '' }
-  }, [])
-
-  const interruptSpeech = useCallback(() => {
-    if (!isSpeakingRef.current && !window.speechSynthesis?.speaking) return false
-    if (bargeInLockRef.current) return true
-    bargeInLockRef.current = true
-    speechGenerationRef.current += 1
-    window.speechSynthesis?.cancel()
-    isSpeakingRef.current = false
-    setSpeaking(false)
-    setInterim('')
-    setLastHeard(`${AGENT_NAME} — listening… say over when finished`)
-    setTimeout(() => {
-      bargeInLockRef.current = false
-    }, 200)
-    return true
-  }, [])
-
-  const startRecognition = useCallback(() => {
-    if (!Recognition || !shouldListenRef.current) return
-
-    stopRecognition()
-
-    const recognition = new Recognition()
-    recognition.lang = 'en-US'
-    // Single utterances; we restart. Continuous mode dumps garbage into fields.
-    recognition.continuous = false
-    recognition.interimResults = true
-    recognition.maxAlternatives = 1
-
-    recognition.onstart = () => setListening(true)
-
-    recognition.onend = () => {
-      setListening(false)
-      if (shouldListenRef.current) {
-        // While Beeva speaks, restart faster only to catch the wake word
-        scheduleRestart(isSpeakingRef.current ? 200 : 350)
-      }
-    }
-
-    recognition.onerror = (event) => {
-      const code = event.error
-      if (code === 'no-speech' || code === 'aborted') return
-      const message =
-        code === 'not-allowed'
-          ? 'Microphone permission denied.'
-          : `Speech error: ${code}`
-      setMicError(message)
-      if (code === 'not-allowed') {
-        shouldListenRef.current = false
-        setMicOn(false)
-        setListening(false)
-      }
-    }
-
-    recognition.onresult = (event) => {
-      let interimText = ''
-      let finalText = ''
-
-      for (let i = event.resultIndex; i < event.results.length; i += 1) {
-        const result = event.results[i]
-        const piece = result[0]?.transcript ?? ''
-        if (result.isFinal) finalText += piece
-        else interimText += piece
-      }
-
-      // Ignore speaker echo while Beeva is talking (brief lock after TTS starts)
-      const echoLocked = Date.now() < speakIgnoreUntilRef.current
-
-      if (interimText) {
-        const trimmed = interimText.trim()
-        const preview = processBeevaProtocol(trimmed, beevaStateRef.current)
-        if (preview.event !== 'ignore') {
-          setInterim(
-            preview.event === 'armed'
-              ? `${AGENT_NAME}…`
-              : `${AGENT_NAME} ${preview.display || '…'}`.trim(),
-          )
-        } else if (!isSpeakingRef.current) {
-          setInterim('')
-        }
-
-        // Barge-in: only the wake word can stop TTS
-        if (
-          !echoLocked &&
-          isSpeakingRef.current &&
-          (preview.event === 'armed' ||
-            preview.event === 'listening' ||
-            preview.event === 'submit')
-        ) {
-          interruptSpeech()
-          beevaStateRef.current = {
-            armed: true,
-            buffer: preview.buffer || '',
-          }
-        }
-      }
-
-      if (!finalText) return
-
-      const cleaned = finalText.trim()
-      setInterim('')
-
-      if (echoLocked && isSpeakingRef.current) {
-        // Drop echo of Beeva's own voice
-        return
-      }
-
-      const next = processBeevaProtocol(cleaned, beevaStateRef.current)
-      beevaStateRef.current = { armed: next.armed, buffer: next.buffer }
-
-      if (next.event === 'ignore') {
-        // Do not write random speech into answers
-        return
-      }
-
-      if (isSpeakingRef.current) {
-        interruptSpeech()
-      }
-
-      if (next.event === 'armed') {
-        setLastHeard(`${AGENT_NAME} — go ahead, then say over`)
-        return
-      }
-
-      if (next.event === 'listening') {
-        setLastHeard(`${AGENT_NAME} ${next.display} …`)
-        return
-      }
-
-      if (next.event === 'submit') {
-        const command = (next.command || '').trim()
-        if (!command) {
-          setLastHeard(`${AGENT_NAME} … over (empty — try again)`)
-          resetBeevaCapture()
-          return
-        }
-        setLastHeard(`${AGENT_NAME} ${command} over`)
-        resetBeevaCapture()
-        onFinalRef.current(command)
-      }
-    }
-
-    recRef.current = recognition
-    try {
-      recognition.start()
-    } catch {
-      scheduleRestart(300)
-    }
-  }, [
-    Recognition,
-    interruptSpeech,
-    resetBeevaCapture,
-    scheduleRestart,
-    stopRecognition,
-  ])
-
-  const speak = useCallback(
-    (text, { force = false } = {}) => {
-      if (!text || typeof window === 'undefined' || !window.speechSynthesis) {
-        return Promise.resolve(false)
-      }
-      // Typing mode stays quiet unless forced
-      if (!force && inputModeRef.current === 'typing') {
-        return Promise.resolve(false)
-      }
-
-      return new Promise((resolve) => {
-        const myGen = ++speechGenerationRef.current
-        bargeInLockRef.current = false
-        resetBeevaCapture()
-        isSpeakingRef.current = true
-        setSpeaking(true)
-        // Block wake/echo for a short window so TTS is not heard as commands
-        speakIgnoreUntilRef.current = Date.now() + 600
-
-        // Keep mic open so user can say "Beeva" to interrupt
-        if (shouldListenRef.current) {
-          try {
-            if (!recRef.current) startRecognition()
-            else scheduleRestart(120)
-          } catch {
-            startRecognition()
-          }
-        }
-
-        window.speechSynthesis.cancel()
-        const utterance = new SpeechSynthesisUtterance(text)
-        utterance.lang = 'en-US'
-        utterance.rate = 1
-
-        const finish = (interrupted) => {
-          if (myGen !== speechGenerationRef.current && !interrupted) {
-            resolve(true)
-            return
-          }
-          if (myGen === speechGenerationRef.current) {
-            isSpeakingRef.current = false
-            setSpeaking(false)
-            if (shouldListenRef.current) {
-              scheduleRestart(300)
-            }
-          }
-          resolve(Boolean(interrupted || myGen !== speechGenerationRef.current))
-        }
-
-        utterance.onend = () => {
-          finish(myGen !== speechGenerationRef.current)
-        }
-
-        utterance.onerror = () => {
-          finish(true)
-        }
-
-        window.speechSynthesis.resume()
-        window.speechSynthesis.speak(utterance)
-      })
-    },
-    [resetBeevaCapture, scheduleRestart, startRecognition],
-  )
-
-  const enableListening = useCallback(() => {
-    shouldListenRef.current = true
-    setMicOn(true)
-    startRecognition()
-  }, [startRecognition])
-
-  const disableListening = useCallback(() => {
-    shouldListenRef.current = false
-    setMicOn(false)
-    stopRecognition()
-    window.speechSynthesis?.cancel()
-    isSpeakingRef.current = false
-    setSpeaking(false)
-    beevaStateRef.current = { armed: false, buffer: '' }
-  }, [stopRecognition])
+  useEffect(() => { stepRef.current = wizardStep }, [wizardStep])
+  useEffect(() => { formRef.current = form }, [form])
+  useEffect(() => { selectedHiveRef.current = selectedHiveId }, [selectedHiveId])
+  useEffect(() => { hivesRef.current = hives }, [hives])
+  useEffect(() => { viewRef.current = view }, [view])
+  useEffect(() => { inspectionKindRef.current = inspectionKind }, [inspectionKind])
+  useEffect(() => { editingRecordIdRef.current = editingRecordId }, [editingRecordId])
+  useEffect(() => { createHiveStepRef.current = createHiveStep }, [createHiveStep])
+  useEffect(() => { createHiveDraftRef.current = createHiveDraft }, [createHiveDraft])
+  useEffect(() => { inputModeRef.current = inputMode }, [inputMode])
 
   const updateFormField = useCallback((field, value) => {
     setForm((prev) => {
@@ -1158,17 +864,12 @@ export default function App() {
     }, 600)
     return () => {
       clearTimeout(timer)
-      shouldListenRef.current = false
-      clearRestartTimer()
-      stopRecognition()
-      window.speechSynthesis?.cancel()
     }
   }, [
     session,
     sttSupported,
     enableListening,
     disableListening,
-    stopRecognition,
   ])
 
   const toggleMic = () => {
@@ -1178,7 +879,6 @@ export default function App() {
       disableListening()
     } else {
       enableListening()
-      setMicError(null)
     }
   }
 
@@ -1218,9 +918,6 @@ export default function App() {
     createHiveStepRef.current = null
     setCreateHiveDraft({ name: '', location: '' })
     createHiveDraftRef.current = { name: '', location: '' }
-    setInterim('')
-    setLastHeard('')
-    setMicError(null)
   }, [disableListening])
 
   const handleChoiceTap = (option) => {
