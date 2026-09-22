@@ -360,7 +360,7 @@ export default function App() {
 
       enableListening()
       await speak(
-        `Hi, I am ${AGENT_NAME}. Always speak like this: say ${AGENT_NAME}, then your answer, then say over. For example: ${AGENT_NAME} inspect orchard one over. Or ${AGENT_NAME} create hive over.`,
+        `Hi, I am ${AGENT_NAME}. Say ${AGENT_NAME}, your answer, then over. Example: ${AGENT_NAME} inspect orchard one over.`,
         { force: true },
       )
     },
@@ -538,12 +538,12 @@ export default function App() {
     async (step, draft = createHiveDraftRef.current) => {
       if (step === 'name') {
         await speak(
-          `Let's create a hive. Say ${AGENT_NAME}, then the hive name, then over.`,
+          `New hive. Say ${AGENT_NAME}, the name, then over.`,
           { force: true },
         )
       } else if (step === 'location') {
         await speak(
-          `Got it. ${draft.name}. Say ${AGENT_NAME}, then the location, then over. Or say ${AGENT_NAME} skip over.`,
+          `${draft.name}. Say ${AGENT_NAME}, the location, then over. Or ${AGENT_NAME} skip over.`,
           { force: true },
         )
       }
@@ -1661,7 +1661,7 @@ function Wizard({
       )}
       {!isTyping && (
         <p className="voice-hint center barge-hint">
-          Example: “{AGENT_NAME} cloudy over” · interrupt with “{AGENT_NAME}”
+          Example: “{AGENT_NAME} cloudy over” · wait for {AGENT_NAME} to finish, then speak
         </p>
       )}
     </main>
