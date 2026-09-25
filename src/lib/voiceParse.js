@@ -113,16 +113,16 @@ export function buildPostSavePrompt(savedHive, hives = []) {
   const next =
     hives.find((h) => h.id !== savedHive?.id) || hives[0]
   const nextWord = next?.keywords?.[0] || next?.name || name
-  return `Saved ${name}. Say Beeva inspect ${nextWord} over, or Beeva exit over.`
+  return `Saved ${name}. Hold talk and say inspect ${nextWord}, or exit.`
 }
 
 /** Reminder when user says continue without a hive name. */
 export function buildContinuePrompt(hives = []) {
   if (!hives.length) {
-    return 'No hives yet. Say Beeva create hive over.'
+    return 'No hives yet. Hold talk and say create hive.'
   }
   const word = hives[0].keywords?.[0] || hives[0].name
-  return `Say Beeva inspect ${word} over, or Beeva exit over.`
+  return `Hold talk and say inspect ${word}, or exit.`
 }
 
 export function parseModeCommand(transcript) {

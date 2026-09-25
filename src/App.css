@@ -287,6 +287,46 @@
   color: #7a4a00;
 }
 
+/* ── Push-to-talk ── */
+
+.ptt-btn {
+  position: sticky;
+  bottom: 1rem;
+  z-index: 40;
+  display: block;
+  width: calc(100% - 2.5rem);
+  max-width: 420px;
+  margin: 1rem auto 0;
+  min-height: 64px;
+  border: none;
+  border-radius: 999px;
+  background: #c47a12;
+  color: #fffaf0;
+  font-family: var(--font-display);
+  font-size: 1.25rem;
+  letter-spacing: 0.02em;
+  box-shadow: 0 10px 28px rgba(140, 80, 10, 0.35);
+  touch-action: none;
+  user-select: none;
+  -webkit-user-select: none;
+  cursor: pointer;
+}
+
+.ptt-btn:active,
+.ptt-btn.active {
+  background: #8b4510;
+  transform: scale(0.98);
+  box-shadow: 0 4px 16px rgba(100, 50, 5, 0.4);
+}
+
+.ptt-btn.speaking-wait {
+  background: #5c6b4a;
+  box-shadow: none;
+  cursor: default;
+  text-align: center;
+  line-height: 64px;
+}
+
 /* ── Dashboard ── */
 
 .dashboard {
@@ -1229,6 +1269,7 @@
   .header,
   .waveform,
   .transcript-pill,
+  .ptt-btn,
   .banner,
   .no-print,
   .mic-badge,
