@@ -93,14 +93,11 @@ export default function App() {
   const {
     listening,
     speaking,
-    holding,
     interim,
     lastHeard,
     micError,
     speak: voiceSpeak,
     stopSpeaking,
-    startTalk,
-    stopTalk,
     clearHeard,
     browserSupportsSpeechRecognition,
   } = voice
@@ -371,7 +368,7 @@ export default function App() {
 
       enableListening()
       await speak(
-        `Hi, I am ${AGENT_NAME}. Hold the talk button, say your command, then release. Example: inspect orchard one.`,
+        `Hi, I am ${AGENT_NAME}. Just speak naturally after I finish. For example: inspect orchard one.`,
         { force: true },
       )
     },
@@ -548,10 +545,12 @@ export default function App() {
   const askCreateHivePrompt = useCallback(
     async (step, draft = createHiveDraftRef.current) => {
       if (step === 'name') {
-        await speak(`New hive. Hold talk and say the hive name.`, { force: true })
+        await speak(`New hive. Say the hive name when you are ready.`, {
+          force: true,
+        })
       } else if (step === 'location') {
         await speak(
-          `${draft.name}. Hold talk and say the location, or say skip.`,
+          `${draft.name}. Say the location, or say skip.`,
           { force: true },
         )
       }
@@ -997,14 +996,14 @@ export default function App() {
     ? 'Mic off'
     : speaking
       ? `${AGENT_NAME} speaking`
-      : holding || listening
+      : listening
         ? 'Listening'
-        : 'Hold to talk'
+        : 'Ready'
   const micClass = !micOn
     ? 'off'
     : speaking
       ? 'speaking'
-      : holding || listening
+      : listening
         ? 'listening'
         : 'idle'
 
@@ -1040,7 +1039,7 @@ export default function App() {
       {micError && showVoiceChrome && <div className="banner error">{micError}</div>}
 
       {showVoiceChrome && view !== 'home' && (
-        <Waveform active={holding || (listening && micOn && !speaking)} />
+        <Waveform active={listening && micOn && !speaking} />
       )}
 
       {showVoiceChrome && (interim || lastHeard) && (
@@ -1059,29 +1058,14 @@ export default function App() {
         </div>
       )}
 
-      {showVoiceChrome && micOn && !speaking && (
-        <button
-          type="button"
-          className={`ptt-btn ${holding ? 'active' : ''}`}
-          onPointerDown={(e) => {
-            e.preventDefault()
-            e.currentTarget.setPointerCapture(e.pointerId)
-            startTalk()
-          }}
-          onPointerUp={(e) => {
-            e.preventDefault()
-            stopTalk()
-          }}
-          onPointerCancel={() => stopTalk()}
-          onContextMenu={(e) => e.preventDefault()}
-        >
-          {holding ? 'Release to send' : 'Hold to speak'}
-        </button>
-      )}
-
       {showVoiceChrome && speaking && (
-        <div className="ptt-btn speaking-wait" aria-live="polite">
-          {AGENT_NAME} is speaking…
+        <div className="listening-status" aria-live="polite">
+          {AGENT_NAME} is speaking — wait, then answer out loud
+        </div>
+      )}
+      {showVoiceChrome && micOn && !speaking && listening && (
+        <div className="listening-status ready" aria-live="polite">
+          Listening — just speak your answer
         </div>
       )}
 
@@ -1311,13 +1295,13 @@ function HomeScreen({ onChoose, sttSupported }) {
           disabled={!sttSupported}
         >
           <span className="home-btn-label">Voice</span>
-          <span className="home-btn-desc">Hold talk button and speak</span>
+          <span className="home-btn-desc">Hands-free — just speak</span>
         </button>
       </div>
 
       {sttSupported && (
         <p className="voice-hint center">
-          Or hold Talk and say “typing” / “voice”
+          Or say “typing” / “voice” out loud
         </p>
       )}
     </main>
@@ -1374,7 +1358,7 @@ function Dashboard({
           <h2 className="setup-title">Your hives</h2>
           <p className="dashboard-intro">
             {isVoice
-              ? 'Hold Talk, say a command, release. Example: create hive.'
+              ? 'Speak naturally after Beeva finishes. Example: create hive.'
               : 'Create a hive first. Inspect is available only after a hive exists.'}
           </p>
         </div>
@@ -1417,11 +1401,11 @@ function Dashboard({
           </div>
           <p className="voice-hint">
             {createHiveStep === 'name'
-              ? 'Hold Talk and say the hive name, e.g. Orchard 1'
-              : 'Hold Talk and say the location, or say skip'}
+              ? 'Say the hive name, e.g. Orchard 1'
+              : 'Say the location, or say skip'}
           </p>
           <div className="command-strip">
-            <span>Say:</span>
+            <span>Try:</span>
             <kbd>hive name</kbd>
             <kbd>skip</kbd>
             <kbd>cancel</kbd>
@@ -1485,7 +1469,7 @@ function Dashboard({
           <p className="empty-hives-title">No hives yet</p>
           <p className="empty-hives-text">
             {isVoice
-              ? 'Hold Talk and say create hive.'
+              ? 'Say create hive.'
               : 'Set up your apiary by creating a hive. Until then, inspection stays locked.'}
           </p>
           {!showCreateHive && (
@@ -1522,7 +1506,7 @@ function Dashboard({
                 <p className="hive-summary">{formatLastSummary(last)}</p>
                 {isVoice && (
                   <p className="voice-hint">
-                    Hold Talk: “inspect {voiceWord}” · “exit”
+                    Say “inspect {voiceWord}” or “exit”
                   </p>
                 )}
                 <div className="card-actions three">
@@ -1689,7 +1673,7 @@ function Wizard({
 
       {!isTyping && (
         <div className="command-strip">
-          <span>Hold Talk, say:</span>
+          <span>Just say:</span>
           <kbd>answer</kbd>
           <kbd>next</kbd>
           <kbd>back</kbd>
@@ -1699,7 +1683,7 @@ function Wizard({
       )}
       {!isTyping && (
         <p className="voice-hint center barge-hint">
-          Wait for {AGENT_NAME} to finish, then hold Talk and say your answer
+          Wait for {AGENT_NAME} to finish, then speak your answer naturally
         </p>
       )}
     </main>

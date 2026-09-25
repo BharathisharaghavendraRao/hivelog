@@ -1,9 +1,10 @@
 /**
- * useVoiceEngine — push-to-talk voice for HiveLog / Beeva
+ * useVoiceEngine — hands-free continuous listening for HiveLog / Beeva
  *
- * Hold the talk button → speak → release → answer/command is submitted.
- * No "Beeva … over" required (those words are stripped if spoken).
- * Mic stays off while Beeva talks so TTS never pollutes answers.
+ * • Mic is always on in voice mode (no buttons).
+ * • User just speaks naturally; each finished phrase is submitted.
+ * • Mic is muted while Beeva talks so her voice is never treated as an answer.
+ * • Optional "Beeva" / "over" words are stripped if said, but never required.
  */
 
 import { useCallback, useEffect, useRef, useState } from 'react'
@@ -14,7 +15,7 @@ import SpeechRecognition, {
 export const AGENT_NAME = 'Beeva'
 
 const FILLER =
-  /\b(beeva|beava|beva|biva|viva|beaver|over(?:\s+and\s+out)?|please)\b/gi
+  /\b(beeva|beava|beva|biva|viva|beaver|hey|ok|okay|um|uh|please|over(?:\s+and\s+out)?)\b/gi
 
 function cleanTranscript(raw) {
   return String(raw || '')
@@ -24,20 +25,37 @@ function cleanTranscript(raw) {
     .trim()
 }
 
+function looksLikeEcho(heard, spoken) {
+  const a = cleanTranscript(heard).toLowerCase()
+  const b = cleanTranscript(spoken).toLowerCase()
+  if (!a || !b) return false
+  if (a.length < 2) return true
+  if (b.includes(a) || a.includes(b)) return true
+  const aw = new Set(a.split(' '))
+  const bw = b.split(' ')
+  const hits = bw.filter((w) => w.length > 2 && aw.has(w)).length
+  return hits >= 2 && hits / Math.max(aw.size, 1) >= 0.5
+}
+
 export function useVoiceEngine({ onCommand, enabled = false }) {
   const [listening, setListening] = useState(false)
   const [speaking, setSpeaking] = useState(false)
   const [interim, setInterim] = useState('')
   const [lastHeard, setLastHeard] = useState('')
   const [micError, setMicError] = useState(null)
-  const [holding, setHolding] = useState(false)
 
   const onCommandRef = useRef(onCommand)
   const enabledRef = useRef(enabled)
   const speakingRef = useRef(false)
-  const holdingRef = useRef(false)
+  const mutedRef = useRef(false)
   const ttsGenRef = useRef(0)
-  const bufferRef = useRef('')
+  const coolUntilRef = useRef(0)
+  const lastSpokenRef = useRef('')
+  const lastSubmitRef = useRef('')
+  const lastSubmitAtRef = useRef(0)
+  const resumeTimerRef = useRef(null)
+  const pendingRef = useRef('')
+  const pendingTimerRef = useRef(null)
 
   useEffect(() => {
     onCommandRef.current = onCommand
@@ -47,7 +65,6 @@ export function useVoiceEngine({ onCommand, enabled = false }) {
   }, [enabled])
 
   const {
-    transcript,
     interimTranscript,
     finalTranscript,
     resetTranscript,
@@ -57,9 +74,56 @@ export function useVoiceEngine({ onCommand, enabled = false }) {
   const clearHeard = useCallback(() => {
     setInterim('')
     setLastHeard('')
-    bufferRef.current = ''
     resetTranscript()
   }, [resetTranscript])
+
+  const stopMic = useCallback(() => {
+    mutedRef.current = true
+    if (resumeTimerRef.current) {
+      clearTimeout(resumeTimerRef.current)
+      resumeTimerRef.current = null
+    }
+    if (pendingTimerRef.current) {
+      clearTimeout(pendingTimerRef.current)
+      pendingTimerRef.current = null
+    }
+    pendingRef.current = ''
+    SpeechRecognition.abortListening().catch(() => {})
+    setListening(false)
+  }, [])
+
+  const startMic = useCallback(() => {
+    if (!enabledRef.current || !browserSupportsSpeechRecognition) return
+    if (speakingRef.current) return
+
+    mutedRef.current = false
+    resetTranscript()
+    SpeechRecognition.startListening({
+      continuous: true,
+      interimResults: true,
+      language: 'en-US',
+    })
+      .then(() => {
+        setListening(true)
+        setMicError(null)
+      })
+      .catch(() => {
+        setListening(false)
+        setMicError('Microphone permission denied — allow mic in the browser.')
+      })
+  }, [browserSupportsSpeechRecognition, resetTranscript])
+
+  const scheduleResumeMic = useCallback(
+    (delayMs = 650) => {
+      if (resumeTimerRef.current) clearTimeout(resumeTimerRef.current)
+      coolUntilRef.current = Date.now() + delayMs + 200
+      resumeTimerRef.current = setTimeout(() => {
+        resumeTimerRef.current = null
+        if (enabledRef.current && !speakingRef.current) startMic()
+      }, delayMs)
+    },
+    [startMic],
+  )
 
   const stopSpeaking = useCallback(() => {
     ttsGenRef.current += 1
@@ -68,12 +132,7 @@ export function useVoiceEngine({ onCommand, enabled = false }) {
     setSpeaking(false)
   }, [])
 
-  const stopMic = useCallback(() => {
-    SpeechRecognition.abortListening().catch(() => {})
-    setListening(false)
-  }, [])
-
-  /** Speak with Web Speech API. Mic stays off. Resolves true if interrupted. */
+  /** Beeva speaks. Mic off until she finishes, then auto-listen again. */
   const speak = useCallback(
     (text, { force = false } = {}) => {
       if (!text) return Promise.resolve(false)
@@ -82,11 +141,9 @@ export function useVoiceEngine({ onCommand, enabled = false }) {
         return Promise.resolve(false)
       }
 
-      // Never listen while Beeva talks
-      holdingRef.current = false
-      setHolding(false)
       stopMic()
       clearHeard()
+      lastSpokenRef.current = text
 
       return new Promise((resolve) => {
         const gen = ++ttsGenRef.current
@@ -105,6 +162,7 @@ export function useVoiceEngine({ onCommand, enabled = false }) {
           }
           speakingRef.current = false
           setSpeaking(false)
+          if (enabledRef.current) scheduleResumeMic(700)
           resolve(Boolean(interrupted))
         }
 
@@ -114,19 +172,30 @@ export function useVoiceEngine({ onCommand, enabled = false }) {
         window.speechSynthesis.speak(utt)
       })
     },
-    [clearHeard, stopMic],
+    [clearHeard, scheduleResumeMic, stopMic],
   )
 
   const submitText = useCallback(
     (raw) => {
       const cmd = cleanTranscript(raw)
-      if (!cmd) {
-        setInterim('Nothing heard — hold and try again')
+      if (!cmd || cmd.length < 1) return false
+
+      // Ignore TTS echo
+      if (looksLikeEcho(cmd, lastSpokenRef.current)) return false
+
+      // Ignore duplicate rapid submits of the same phrase
+      const now = Date.now()
+      if (
+        cmd === lastSubmitRef.current &&
+        now - lastSubmitAtRef.current < 1500
+      ) {
         return false
       }
+
+      lastSubmitRef.current = cmd
+      lastSubmitAtRef.current = now
       setLastHeard(cmd)
       setInterim('')
-      bufferRef.current = ''
       resetTranscript()
       onCommandRef.current(cmd)
       return true
@@ -134,102 +203,69 @@ export function useVoiceEngine({ onCommand, enabled = false }) {
     [resetTranscript],
   )
 
-  /** Press / hold to start capturing speech */
-  const startTalk = useCallback(() => {
-    if (!enabledRef.current || !browserSupportsSpeechRecognition) return
-    if (speakingRef.current) {
-      stopSpeaking()
-    }
-    holdingRef.current = true
-    setHolding(true)
-    bufferRef.current = ''
-    resetTranscript()
-    setInterim('Listening…')
-    setLastHeard('')
-    SpeechRecognition.startListening({
-      continuous: true,
-      interimResults: true,
-      language: 'en-US',
-    })
-      .then(() => {
-        setListening(true)
-        setMicError(null)
-      })
-      .catch(() => {
-        holdingRef.current = false
-        setHolding(false)
-        setMicError('Microphone permission denied.')
-      })
-  }, [browserSupportsSpeechRecognition, resetTranscript, stopSpeaking])
-
-  // Live preview + buffer while holding
+  // Final chunks → debounce into one natural phrase, then submit
+  const prevFinal = useRef('')
   useEffect(() => {
-    if (!holdingRef.current) return
-    const piece = `${finalTranscript || ''} ${interimTranscript || ''}`.trim()
-    if (!piece && !transcript) return
-    const combined = cleanTranscript(
-      `${bufferRef.current} ${finalTranscript} ${interimTranscript || transcript}`,
-    )
-    if (finalTranscript) {
-      bufferRef.current = cleanTranscript(
-        `${bufferRef.current} ${finalTranscript}`,
-      )
+    if (!finalTranscript || finalTranscript === prevFinal.current) return
+    prevFinal.current = finalTranscript
+
+    if (!enabledRef.current || mutedRef.current || speakingRef.current) {
       resetTranscript()
+      return
     }
-    setInterim(combined || bufferRef.current || 'Listening…')
-  }, [transcript, interimTranscript, finalTranscript, resetTranscript])
+    if (Date.now() < coolUntilRef.current) {
+      resetTranscript()
+      return
+    }
 
-  /** Release to submit whatever was said */
-  const stopTalk = useCallback(() => {
-    if (!holdingRef.current) return
-    holdingRef.current = false
-    setHolding(false)
+    const piece = cleanTranscript(finalTranscript)
+    resetTranscript()
+    if (!piece) return
+    if (looksLikeEcho(piece, lastSpokenRef.current)) return
 
-    const snapshot = cleanTranscript(
-      `${bufferRef.current} ${finalTranscript} ${interimTranscript} ${transcript}`,
-    )
+    pendingRef.current = cleanTranscript(`${pendingRef.current} ${piece}`)
+    setInterim(pendingRef.current)
 
-    SpeechRecognition.stopListening()
-      .catch(() => {})
-      .finally(() => {
-        setListening(false)
-        setTimeout(() => {
-          const latest =
-            cleanTranscript(bufferRef.current) ||
-            snapshot ||
-            cleanTranscript(transcript)
-          if (latest) submitText(latest)
-          else setInterim('Nothing heard — hold and try again')
-          resetTranscript()
-        }, 350)
-      })
-  }, [
-    transcript,
-    finalTranscript,
-    interimTranscript,
-    submitText,
-    resetTranscript,
-  ])
+    if (pendingTimerRef.current) clearTimeout(pendingTimerRef.current)
+    // Wait for a brief pause so full sentences are kept together
+    pendingTimerRef.current = setTimeout(() => {
+      const full = pendingRef.current
+      pendingRef.current = ''
+      pendingTimerRef.current = null
+      if (full) submitText(full)
+    }, 900)
+  }, [finalTranscript, resetTranscript, submitText])
 
-  // When voice mode turns off, stop everything
+  // Live preview while user is talking
+  useEffect(() => {
+    if (!enabledRef.current || mutedRef.current || speakingRef.current) return
+    if (!interimTranscript) return
+    setInterim(cleanTranscript(interimTranscript) || interimTranscript)
+  }, [interimTranscript])
+
+  // Keep listening whenever voice mode is on (and Beeva is quiet)
   useEffect(() => {
     if (!browserSupportsSpeechRecognition) {
       setMicError('Speech recognition needs Chrome or Edge.')
       return undefined
     }
-    if (!enabled) {
-      holdingRef.current = false
-      setHolding(false)
+
+    if (enabled) {
+      if (!speakingRef.current) startMic()
+    } else {
       stopMic()
       stopSpeaking()
       clearHeard()
     }
+
     return () => {
-      stopMic()
+      if (resumeTimerRef.current) clearTimeout(resumeTimerRef.current)
+      SpeechRecognition.abortListening().catch(() => {})
     }
   }, [
     enabled,
     browserSupportsSpeechRecognition,
+    startMic,
     stopMic,
     stopSpeaking,
     clearHeard,
@@ -238,14 +274,11 @@ export function useVoiceEngine({ onCommand, enabled = false }) {
   return {
     listening,
     speaking,
-    holding,
     interim,
     lastHeard,
     micError,
     speak,
     stopSpeaking,
-    startTalk,
-    stopTalk,
     clearHeard,
     browserSupportsSpeechRecognition,
   }
